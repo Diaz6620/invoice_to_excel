@@ -1,0 +1,189 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Factura a Excel</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>🧾</text></svg>">
+<link href="https://fonts.googleapis.com/css2?family=Schibsted+Grotesk:wght@400;600;800&display=swap" rel="stylesheet">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+<style>
+:root{--bg:#eef2f7;--ink:#14213d;--muted:#5b6b85;--line:#cbd5e1;--card:#fff;--acc:#0f766e;--accd:#0b5a54;--err:#b42318}
+@media (prefers-color-scheme:dark){:root{--bg:#0f1624;--ink:#e6ecf5;--muted:#93a3bd;--line:#2b3a55;--card:#172033;--acc:#2dd4bf;--accd:#5eead4;--err:#f97066}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font:16px/1.5 "Schibsted Grotesk",system-ui,sans-serif}
+main{max-width:920px;margin:0 auto;padding:48px 20px 80px}
+h1{font-size:clamp(2rem,6vw,3.2rem);line-height:1.05;margin:0 0 10px;font-weight:800;letter-spacing:-.02em}
+.sub{color:var(--muted);margin:0 0 28px;max-width:52ch}
+#drop{display:block;border:2px dashed var(--line);border-radius:14px;background:var(--card);padding:44px 20px;text-align:center;cursor:pointer;transition:border-color .15s,background .15s}
+#drop:hover,#drop:focus-within,#drop.over{border-color:var(--acc);background:color-mix(in srgb,var(--acc) 7%,var(--card))}
+#drop strong{display:block;font-size:1.15rem}
+#drop span{color:var(--muted);font-size:.92rem}
+#drop input{position:absolute;opacity:0;width:1px;height:1px}
+#msg{min-height:1.5em;margin:12px 0 0;font-size:.95rem;color:var(--muted)}
+#msg.err{color:var(--err)}
+.wrap{overflow-x:auto;margin-top:24px;background:var(--card);border:1px solid var(--line);border-radius:12px}
+table{border-collapse:collapse;width:100%;min-width:640px}
+th,td{padding:0;border-bottom:1px solid var(--line);text-align:left}
+th{padding:10px 12px;font-size:.85rem;color:var(--muted);font-weight:600}
+tr:last-child td{border-bottom:0}
+td input{width:100%;border:0;background:transparent;color:inherit;font:inherit;padding:11px 12px}
+td input:focus{outline:2px solid var(--acc);outline-offset:-2px;background:color-mix(in srgb,var(--acc) 6%,transparent)}
+td.n input{text-align:right;font-variant-numeric:tabular-nums}
+th.n{text-align:right}
+td.x{width:44px;text-align:center}
+td.x button{border:0;background:none;color:var(--muted);cursor:pointer;font-size:1.1rem;padding:8px}
+td.x button:hover{color:var(--err)}
+tr.loading td{padding:12px;color:var(--muted)}
+.bar{display:flex;flex-wrap:wrap;gap:10px;margin-top:18px}
+button.b{font:inherit;font-weight:600;padding:11px 18px;border-radius:10px;border:1px solid var(--acc);cursor:pointer;background:var(--acc);color:#fff}
+@media (prefers-color-scheme:dark){button.b{color:#06201d}}
+button.b.alt{background:transparent;color:var(--acc)}
+button.b:hover{filter:brightness(.92)}
+button.b:focus-visible{outline:3px solid var(--ink);outline-offset:2px}
+.empty{padding:28px 16px;color:var(--muted);text-align:center}
+</style>
+</head>
+<body>
+<main>
+  <h1>Factura a Excel</h1>
+  <p class="sub">Arrastra tus facturas y recibe una tabla lista para descargar. Revisa los datos antes de exportar.</p>
+
+  <label id="drop" for="file">
+    <strong>Arrastra facturas aquí o haz clic para elegirlas</strong>
+    <span>PDF, JPG o PNG · máx. 4 MB por archivo</span>
+    <input id="file" type="file" accept="application/pdf,image/jpeg,image/png,image/webp" multiple>
+  </label>
+  <p id="msg" role="status"></p>
+
+  <div class="wrap">
+    <table>
+      <thead><tr>
+        <th>Nº factura</th><th>Proveedor</th><th>Fecha</th><th class="n">Base</th><th class="n">IVA</th><th class="n">Total</th><th></th>
+      </tr></thead>
+      <tbody id="rows"></tbody>
+    </table>
+    <div id="empty" class="empty">Aún no hay facturas. Sube la primera para empezar.</div>
+  </div>
+
+  <div class="bar">
+    <button class="b" id="xlsx">Descargar Excel</button>
+    <button class="b alt" id="csv">Descargar CSV</button>
+    <button class="b alt" id="copy">Copiar</button>
+  </div>
+</main>
+
+<script>
+const MAX = 4 * 1024 * 1024;
+const COLS = ["numero", "proveedor", "fecha", "base", "iva", "total"];
+const HEAD = ["Nº factura", "Proveedor", "Fecha", "Base", "IVA", "Total"];
+const NUM = new Set(["base", "iva", "total"]);
+const $ = (id) => document.getElementById(id);
+const rows = $("rows"), msg = $("msg"), drop = $("drop");
+
+function say(t, err) { msg.textContent = t; msg.className = err ? "err" : ""; }
+function updateEmpty() { $("empty").style.display = rows.querySelector("tr:not(.loading)") ? "none" : "block"; }
+
+const toBase64 = (file) => new Promise((ok, ko) => {
+  const r = new FileReader();
+  r.onload = () => ok(r.result.split(",")[1]);
+  r.onerror = () => ko(new Error("No se pudo leer el archivo"));
+  r.readAsDataURL(file);
+});
+
+function addRow(d) {
+  const tr = document.createElement("tr");
+  COLS.forEach((c) => {
+    const td = document.createElement("td");
+    if (NUM.has(c)) td.className = "n";
+    const i = document.createElement("input");
+    i.value = d[c] ?? "";
+    i.setAttribute("aria-label", HEAD[COLS.indexOf(c)]);
+    i.dataset.c = c;
+    if (NUM.has(c)) i.inputMode = "decimal";
+    td.appendChild(i); tr.appendChild(td);
+  });
+  const x = document.createElement("td"); x.className = "x";
+  x.innerHTML = '<button title="Quitar fila" aria-label="Quitar fila">×</button>';
+  x.firstChild.onclick = () => { tr.remove(); updateEmpty(); };
+  tr.appendChild(x);
+  return tr;
+}
+
+async function process(file) {
+  const ph = document.createElement("tr");
+  ph.className = "loading";
+  ph.innerHTML = `<td colspan="7">Leyendo ${file.name}…</td>`;
+  rows.appendChild(ph); updateEmpty();
+  try {
+    if (file.size > MAX) throw new Error(`${file.name} supera los 4 MB`);
+    const res = await fetch("/.netlify/functions/extract", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ mediaType: file.type, data: await toBase64(file) }),
+    });
+    const out = await res.json();
+    if (!res.ok) throw new Error(out.error || "Error al procesar");
+    ph.replaceWith(addRow(out));
+  } catch (e) {
+    ph.remove();
+    say(`${file.name}: ${e.message}`, true);
+  }
+  updateEmpty();
+}
+
+async function handle(files) {
+  say("");
+  const list = [...files];
+  await Promise.all(list.map(process));
+  if (!msg.className) say("Listo. Corrige lo que haga falta y descarga.");
+}
+
+$("file").onchange = (e) => { handle(e.target.files); e.target.value = ""; };
+["dragenter", "dragover"].forEach((ev) => drop.addEventListener(ev, (e) => { e.preventDefault(); drop.classList.add("over"); }));
+["dragleave", "drop"].forEach((ev) => drop.addEventListener(ev, (e) => { e.preventDefault(); drop.classList.remove("over"); }));
+drop.addEventListener("drop", (e) => handle(e.dataTransfer.files));
+
+function data() {
+  return [...rows.querySelectorAll("tr:not(.loading)")].map((tr) =>
+    [...tr.querySelectorAll("input")].map((i) => {
+      if (!NUM.has(i.dataset.c)) return i.value.trim();
+      const n = parseFloat(i.value.replace(/\s|€/g, "").replace(",", "."));
+      return isNaN(n) ? "" : n;
+    }));
+}
+function guard() { const d = data(); if (!d.length) { say("No hay filas que exportar.", true); return null; } return d; }
+function save(blob, name) {
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob); a.download = name; a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+}
+const stamp = () => new Date().toISOString().slice(0, 10);
+
+$("xlsx").onclick = () => {
+  const d = guard(); if (!d) return;
+  const ws = XLSX.utils.aoa_to_sheet([HEAD, ...d]);
+  ws["!cols"] = [{ wch: 14 }, { wch: 28 }, { wch: 12 }, { wch: 12 }, { wch: 12 }, { wch: 12 }];
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, "Facturas");
+  XLSX.writeFile(wb, `facturas-${stamp()}.xlsx`);
+  say("Excel descargado.");
+};
+$("csv").onclick = () => {
+  const d = guard(); if (!d) return;
+  const q = (v) => `"${String(v).replace(/"/g, '""')}"`;
+  const csv = [HEAD, ...d].map((r) => r.map(q).join(";")).join("\r\n");
+  save(new Blob(["\ufeff" + csv], { type: "text/csv;charset=utf-8" }), `facturas-${stamp()}.csv`);
+  say("CSV descargado.");
+};
+$("copy").onclick = async () => {
+  const d = guard(); if (!d) return;
+  try {
+    await navigator.clipboard.writeText([HEAD, ...d].map((r) => r.join("\t")).join("\n"));
+    say("Copiado. Pégalo en Excel o Google Sheets.");
+  } catch { say("El navegador bloqueó el portapapeles.", true); }
+};
+updateEmpty();
+</script>
+</body>
+</html>
